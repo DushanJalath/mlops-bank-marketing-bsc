@@ -1,0 +1,10 @@
+.venv
+.git
+.dvc/cache
+data
+mlruns
+plots
+tests
+monitoring
+replayer
+*.md

@@ -1,0 +1,52 @@
+stages:
+  download:
+    cmd: uv run python -m src.download
+    deps:
+      - src/download.py
+    params:
+      - data.url
+      - data.raw
+    outs:
+      - data/raw/bank-additional-full.csv
+
+  prepare:
+    cmd: uv run python -m src.data
+    deps:
+      - src/data.py
+      - data/raw/bank-additional-full.csv
+      - data/production/labelled.csv
+    params:
+      - data
+      - model.cat_features
+    outs:
+      - data/processed/train.csv
+      - data/processed/eval.csv
+      - data/processed/future.csv
+
+  train:
+    cmd: uv run python -m src.train
+    deps:
+      - src/train.py
+      - data/processed/train.csv
+    params:
+      - model
+    outs:
+      - models/model.cbm
+      - run_info.json:
+          cache: false
+
+  evaluate:
+    cmd: uv run python -m src.evaluate
+    deps:
+      - src/evaluate.py
+      - src/metrics.py
+      - models/model.cbm
+      - data/processed/eval.csv
+    params:
+      - evaluate.top_k_fraction
+    metrics:
+      - eval_metrics.json:
+          cache: false
+    plots:
+      - plots/shap_summary.png:
+          cache: false

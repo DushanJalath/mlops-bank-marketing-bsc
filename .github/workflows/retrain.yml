@@ -1,0 +1,79 @@
+name: Retrain
+
+# Started by the monitor (or by hand). Adds the newly labelled production rows,
+# retrains, and opens a pull request only if the new model beats the champion.
+on:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: Why are we retraining?
+        default: manual
+
+permissions:
+  contents: write
+  pull-requests: write
+  id-token: write
+
+env:
+  DAGSHUB_OWNER: ${{ vars.DAGSHUB_OWNER }}
+  DAGSHUB_TOKEN: ${{ secrets.DAGSHUB_TOKEN }}
+  DAGSHUB_REPO: ${{ vars.DAGSHUB_REPO || 'mlops-bank-marketing' }}
+  LOG_ANALYTICS_WORKSPACE_ID: ${{ vars.LOG_ANALYTICS_WORKSPACE_ID }}
+  REASON: ${{ inputs.reason }}
+
+jobs:
+  retrain:
+    if: vars.AZURE_CLIENT_ID != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
+        with:
+          version: "0.11.7"
+
+      - name: Pull data and model
+        run: |
+          uv sync --frozen
+          make dvc-auth
+          uv run dvc pull
+
+      - uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906  # v3.1.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Add newly labelled production rows (a new data version)
+        run: |
+          uv run python -m monitoring.export --hours 720 --labelled-only \
+            --append-to data/production/labelled.csv
+          uv run dvc add data/production/labelled.csv
+
+      - name: Retrain (prepare, train, evaluate)
+        run: uv run dvc repro
+
+      - name: Quality gate (challenger vs champion)
+        run: uv run python -m src.gate --report gate_report.md
+
+      - name: Show the gate report
+        if: always()
+        run: cat gate_report.md >> "$GITHUB_STEP_SUMMARY" || true
+
+      - name: Store the new data and model
+        run: uv run dvc push
+
+      - name: Open a pull request for human review
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          BRANCH="retrain/$(date -u +%Y%m%d-%H%M)"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+          git add data/production/labelled.csv.dvc dvc.lock run_info.json eval_metrics.json \
+            plots/shap_summary.png
+          git commit -m "Retrain: $REASON"
+          git push origin "$BRANCH"
+          gh pr create --base main --head "$BRANCH" \
+            --title "Retrained model ($REASON)" --body-file gate_report.md

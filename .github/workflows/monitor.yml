@@ -1,0 +1,59 @@
+name: Monitor
+
+# Every 6 hours (or on demand): compare recent traffic with the training data,
+# measure live quality, and start retraining if the rules in params.yaml say so.
+on:
+  schedule:
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+  actions: write   # needed to start the retrain workflow
+
+env:
+  DAGSHUB_OWNER: ${{ vars.DAGSHUB_OWNER }}
+  DAGSHUB_TOKEN: ${{ secrets.DAGSHUB_TOKEN }}
+  DAGSHUB_REPO: ${{ vars.DAGSHUB_REPO || 'mlops-bank-marketing' }}
+  LOG_ANALYTICS_WORKSPACE_ID: ${{ vars.LOG_ANALYTICS_WORKSPACE_ID }}
+
+jobs:
+  drift:
+    if: vars.AZURE_CLIENT_ID != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
+        with:
+          version: "0.11.7"
+
+      - name: Pull the training data (the reference for drift)
+        run: |
+          uv sync --frozen
+          make dvc-auth
+          uv run dvc pull data/processed/train.csv
+
+      - uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906  # v3.1.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Export the last 6 hours of predictions and feedback
+        run: uv run python -m monitoring.export --hours 6 --out monitoring/current.csv
+
+      - name: Check drift and live quality
+        id: check
+        run: |
+          uv run python -m monitoring.drift_check --current monitoring/current.csv
+          { echo '```json'; cat monitoring/drift_summary.json; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Start retraining
+        if: steps.check.outputs.retrain == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          SHARE=$(jq -r .drift_share monitoring/drift_summary.json)
+          gh workflow run retrain.yml -f reason="drift share $SHARE"

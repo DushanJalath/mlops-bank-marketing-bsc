@@ -1,0 +1,65 @@
+name: CI
+
+# Runs on every pull request: lint, tests, reproducibility check and the model quality gate.
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+env:
+  DAGSHUB_OWNER: ${{ vars.DAGSHUB_OWNER }}
+  DAGSHUB_TOKEN: ${{ secrets.DAGSHUB_TOKEN }}
+  DAGSHUB_REPO: ${{ vars.DAGSHUB_REPO || 'mlops-bank-marketing' }}
+
+jobs:
+  check:
+    if: vars.DAGSHUB_OWNER != ''   # skip until DagsHub is set up
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
+        with:
+          version: "0.11.7"
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Lint
+        run: make lint
+
+      - name: Unit tests
+        run: make test
+
+      - name: Pull data and model with DVC
+        run: |
+          make dvc-auth
+          uv run dvc pull
+
+      - name: Check the committed model matches the code and data
+        run: |
+          if ! uv run dvc status --quiet; then
+            uv run dvc status
+            echo "::error::Pipeline is out of date. Run 'dvc repro', then commit dvc.lock and run 'dvc push'."
+            exit 1
+          fi
+
+      - name: Quality gate (challenger vs champion)
+        id: gate
+        continue-on-error: true
+        run: uv run python -m src.gate --report gate_report.md
+
+      - name: Post the gate report on the pull request
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: gh pr comment "$PR" --body-file gate_report.md
+
+      - name: Fail if the gate failed
+        if: steps.gate.outcome == 'failure'
+        run: exit 1

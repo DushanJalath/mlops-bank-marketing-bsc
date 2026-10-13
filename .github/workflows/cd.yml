@@ -1,0 +1,156 @@
+name: CD
+
+# On every push to main: build the image with the committed model, deploy it to Azure
+# as a canary after approval, then mark that model version as @champion.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+
+# Never run two deployments at the same time: they would fight over the traffic split.
+concurrency:
+  group: cd-production
+  cancel-in-progress: false
+
+env:
+  DAGSHUB_OWNER: ${{ vars.DAGSHUB_OWNER }}
+  DAGSHUB_TOKEN: ${{ secrets.DAGSHUB_TOKEN }}
+  DAGSHUB_REPO: ${{ vars.DAGSHUB_REPO || 'mlops-bank-marketing' }}
+  APP_NAME: ca-bank-marketing
+  RESOURCE_GROUP: rg-mlops-workshop
+
+jobs:
+  build:
+    if: vars.DAGSHUB_OWNER != ''
+    runs-on: ubuntu-24.04
+    outputs:
+      image: ${{ steps.name.outputs.image }}
+      tag: ${{ steps.name.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
+        with:
+          version: "0.11.7"
+
+      # TEMPORARY: shows what CI uses to reach DagsHub. Remove once the build passes.
+      # GitHub masks secret values in logs, so only the token's length is printed.
+      - name: Debug DagsHub access (temporary)
+        run: |
+          echo "owner=[$DAGSHUB_OWNER] token_length=${#DAGSHUB_TOKEN}"
+          MD5=$(grep -A3 "path: models/model.cbm" dvc.lock | grep -m1 "md5:" | awk '{print $2}')
+          echo "model md5 in dvc.lock: $MD5"
+          curl -s -o /dev/null -w "model file on DagsHub: %{http_code}\n" -u "$DAGSHUB_OWNER:$DAGSHUB_TOKEN" \
+            "https://dagshub.com/$DAGSHUB_OWNER/mlops-bank-marketing.dvc/files/md5/${MD5:0:2}/${MD5:2}"
+          echo "--- .dvc/config ---"
+          cat .dvc/config
+
+      - name: Pull the exact model CI tested
+        run: |
+          echo "DEBUG owner=[$DAGSHUB_OWNER] token_length=${#DAGSHUB_TOKEN}"
+          MD5=$(grep -A3 "path: models/model.cbm" dvc.lock | grep -m1 "md5:" | awk '{print $2}')
+          echo "DEBUG model md5 in dvc.lock: $MD5"
+          curl -s -o /dev/null -w "DEBUG model file on DagsHub: %{http_code}\n" -u "$DAGSHUB_OWNER:$DAGSHUB_TOKEN" \
+            "https://dagshub.com/$DAGSHUB_OWNER/mlops-bank-marketing.dvc/files/md5/${MD5:0:2}/${MD5:2}"
+          uv sync --frozen
+          make dvc-auth
+          uv run dvc pull models/model.cbm
+
+      - name: Image name (registries need lowercase)
+        id: name
+        run: |
+          echo "image=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+          echo "tag=sha-${GITHUB_SHA::7}-${GITHUB_RUN_NUMBER}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push to GitHub Container Registry
+        env:
+          IMAGE: ${{ steps.name.outputs.image }}
+          TAG: ${{ steps.name.outputs.tag }}
+          TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          echo "$TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
+          docker build --build-arg MODEL_VERSION="$TAG" -t "$IMAGE:$TAG" -t "$IMAGE:latest" .
+          docker push "$IMAGE:$TAG"
+          docker push "$IMAGE:latest"
+
+  deploy:
+    needs: build
+    if: vars.AZURE_CLIENT_ID != ''   # skip until the Azure resources exist
+    runs-on: ubuntu-24.04
+    environment: production          # waits for a reviewer to approve
+    env:
+      IMAGE: ${{ needs.build.outputs.image }}
+      TAG: ${{ needs.build.outputs.tag }}
+    steps:
+      - name: Log in to Azure without a password (OIDC)
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906  # v3.1.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Pin all traffic to the revision that is live now
+        run: |
+          OLD=$(az containerapp revision list -n "$APP_NAME" -g "$RESOURCE_GROUP" \
+            --query "[?properties.trafficWeight==\`100\`].name | [0]" -o tsv)
+          if [ -z "$OLD" ]; then
+            OLD=$(az containerapp show -n "$APP_NAME" -g "$RESOURCE_GROUP" \
+              --query properties.latestRevisionName -o tsv)
+          fi
+          echo "OLD=$OLD" >> "$GITHUB_ENV"
+          az containerapp ingress traffic set -n "$APP_NAME" -g "$RESOURCE_GROUP" \
+            --revision-weight "$OLD=100" -o none
+          echo "Live revision: $OLD"
+
+      - name: Start the new revision (it receives 0% of traffic)
+        run: |
+          az containerapp update -n "$APP_NAME" -g "$RESOURCE_GROUP" \
+            --image "$IMAGE:$TAG" --revision-suffix "$TAG" -o none
+          echo "NEW=$APP_NAME--$TAG" >> "$GITHUB_ENV"
+
+      - name: Smoke test the new revision on its own URL
+        run: |
+          FQDN=$(az containerapp revision show -n "$APP_NAME" -g "$RESOURCE_GROUP" \
+            --revision "$NEW" --query properties.fqdn -o tsv)
+          for attempt in $(seq 1 30); do
+            if curl -sf "https://$FQDN/health"; then echo; exit 0; fi
+            sleep 10
+          done
+          echo "::error::The new revision never became healthy. Users still see $OLD."
+          exit 1
+
+      - name: Canary - 10% of traffic to the new revision
+        run: |
+          az containerapp ingress traffic set -n "$APP_NAME" -g "$RESOURCE_GROUP" \
+            --revision-weight "$OLD=90" "$NEW=10" -o none
+          sleep 120   # in a real team, check error rates in Application Insights here
+
+      - name: Release - 100% of traffic to the new revision
+        run: |
+          az containerapp ingress traffic set -n "$APP_NAME" -g "$RESOURCE_GROUP" \
+            --revision-weight "$NEW=100" -o none
+          echo "Rollback, if ever needed: az containerapp ingress traffic set -n $APP_NAME \
+            -g $RESOURCE_GROUP --revision-weight $OLD=100" >> "$GITHUB_STEP_SUMMARY"
+
+  promote:
+    needs: [build, deploy]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
+        with:
+          version: "0.11.7"
+
+      - name: Mark the deployed model as @champion
+        env:
+          IMAGE: ${{ needs.build.outputs.image }}:${{ needs.build.outputs.tag }}
+        run: |
+          uv sync --frozen
+          uv run python -m src.registry promote --image "$IMAGE"

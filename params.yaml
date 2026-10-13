@@ -1,0 +1,29 @@
+data:
+  url: https://archive.ics.uci.edu/static/public/222/bank+marketing.zip
+  raw: data/raw/bank-additional-full.csv
+  production: data/production/labelled.csv
+  processed_dir: data/processed
+  history_frac: 0.8      # oldest 80% of rows = history we train on; newest 20% = "future" for the replayer
+  val_frac: 0.2          # random share of history held out to evaluate the first model
+  holdout_frac: 0.3      # newest share of labelled production data used to judge retrained models
+  drop_columns: ['duration']   # only known after the call, so it leaks the answer
+  seed: 42
+
+model:
+  name: bank-marketing   # name in the MLflow model registry
+  experiment: bank-marketing
+  cat_features: [job, marital, education, default, housing, loan, contact, month, day_of_week, poutcome]
+  catboost:
+    iterations: 400
+    learning_rate: 0.05
+    depth: 6
+    random_seed: 42
+
+evaluate:
+  top_k_fraction: 0.2    # the call centre can only call the top 20% of leads
+  gate_metric: pr_auc    # metric a challenger must improve to replace the champion
+  gate_min_delta: 0.0
+
+monitor:
+  drift_share_threshold: 0.3   # retrain when at least 30% of features have drifted...
+  min_labelled_rows: 1000      # ...and we have enough labelled production rows to learn from
