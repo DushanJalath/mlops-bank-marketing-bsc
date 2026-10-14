@@ -38,25 +38,8 @@ jobs:
         with:
           version: "0.11.7"
 
-      # TEMPORARY: shows what CI uses to reach DagsHub. Remove once the build passes.
-      # GitHub masks secret values in logs, so only the token's length is printed.
-      - name: Debug DagsHub access (temporary)
-        run: |
-          echo "owner=[$DAGSHUB_OWNER] token_length=${#DAGSHUB_TOKEN}"
-          MD5=$(grep -A3 "path: models/model.cbm" dvc.lock | grep -m1 "md5:" | awk '{print $2}')
-          echo "model md5 in dvc.lock: $MD5"
-          curl -s -o /dev/null -w "model file on DagsHub: %{http_code}\n" -u "$DAGSHUB_OWNER:$DAGSHUB_TOKEN" \
-            "https://dagshub.com/$DAGSHUB_OWNER/mlops-bank-marketing.dvc/files/md5/${MD5:0:2}/${MD5:2}"
-          echo "--- .dvc/config ---"
-          cat .dvc/config
-
       - name: Pull the exact model CI tested
         run: |
-          echo "DEBUG owner=[$DAGSHUB_OWNER] token_length=${#DAGSHUB_TOKEN}"
-          MD5=$(grep -A3 "path: models/model.cbm" dvc.lock | grep -m1 "md5:" | awk '{print $2}')
-          echo "DEBUG model md5 in dvc.lock: $MD5"
-          curl -s -o /dev/null -w "DEBUG model file on DagsHub: %{http_code}\n" -u "$DAGSHUB_OWNER:$DAGSHUB_TOKEN" \
-            "https://dagshub.com/$DAGSHUB_OWNER/mlops-bank-marketing.dvc/files/md5/${MD5:0:2}/${MD5:2}"
           uv sync --frozen
           make dvc-auth
           uv run dvc pull models/model.cbm
