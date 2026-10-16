@@ -22,8 +22,8 @@ stages:
     deps:
     - path: data/production/labelled.csv
       hash: md5
-      md5: 55f679f06c3ba5e8d052adb456fe7a3c
-      size: 193
+      md5: 6577bb033443ea4381f5898e41e29359
+      size: 3847813
     - path: data/raw/bank-additional-full.csv
       hash: md5
       md5: f6cb2c1256ffe2836b36df321f46e92c
@@ -59,23 +59,23 @@ stages:
     outs:
     - path: data/processed/eval.csv
       hash: md5
-      md5: 20906f1ff0c994de345fece64dd975b3
-      size: 757811
+      md5: b75e481fc44479206641464c273d354c
+      size: 713895
     - path: data/processed/future.csv
       hash: md5
       md5: 2e99627329a03c5465693d96808dcb91
       size: 927965
     - path: data/processed/train.csv
       hash: md5
-      md5: 565398a9fccf4c59c373205e31057601
-      size: 3025231
+      md5: e3ace3f987d46a1d3f106aa0bcb3c932
+      size: 5446767
   train:
     cmd: uv run python -m src.train
     deps:
     - path: data/processed/train.csv
       hash: md5
-      md5: 565398a9fccf4c59c373205e31057601
-      size: 3025231
+      md5: e3ace3f987d46a1d3f106aa0bcb3c932
+      size: 5446767
     - path: src/train.py
       hash: md5
       md5: 4e64a2b11be045adad37da9012176863
@@ -104,23 +104,23 @@ stages:
     outs:
     - path: models/model.cbm
       hash: md5
-      md5: 7a1e61d0079344902286717790ad50d8
-      size: 725360
+      md5: 74aa33cdfe69ab91c63ed2d4382bf6d7
+      size: 750348
     - path: run_info.json
       hash: md5
-      md5: 961c3a07353cae90bcc572838dd30603
+      md5: ca593b6a466129925ad924214175525b
       size: 112
   evaluate:
     cmd: uv run python -m src.evaluate
     deps:
     - path: data/processed/eval.csv
       hash: md5
-      md5: 20906f1ff0c994de345fece64dd975b3
-      size: 757811
+      md5: b75e481fc44479206641464c273d354c
+      size: 713895
     - path: models/model.cbm
       hash: md5
-      md5: 7a1e61d0079344902286717790ad50d8
-      size: 725360
+      md5: 74aa33cdfe69ab91c63ed2d4382bf6d7
+      size: 750348
     - path: src/evaluate.py
       hash: md5
       md5: 86fcd7b8f24c2c19285077180c6a50b2
@@ -135,9 +135,9 @@ stages:
     outs:
     - path: eval_metrics.json
       hash: md5
-      md5: 10ad2c3e1824163d583b3058553f152e
-      size: 209
+      md5: 1b556c089e30d224c10dcb2dd35e8de9
+      size: 207
     - path: plots/shap_summary.png
       hash: md5
-      md5: 6d984955f123fd49d192581e0838fdfa
-      size: 76491
+      md5: 77590d34fc6909771bb7b62cf7b25f08
+      size: 79316
